@@ -4,59 +4,11 @@ from models.user_model import User
 from models.Company_model import Company
 from utils.auth_utils import token_required
 from datetime import datetime
-from flasgger import swag_from
 
 company_bp = Blueprint('company', __name__)
 
 @company_bp.route('/company', methods=['POST'])
 @token_required
-@swag_from({
-    'tags': ['Company'],
-    'summary': 'Create a new company',
-    'description': 'Create a new company, restricted to company_admin or website_admin.',
-    'security': [{'Bearer': []}],
-    'consumes': ['application/json'],
-    'produces': ['application/json'],
-    'parameters': [
-        {
-            'in': 'body',
-            'name': 'body',
-            'required': True,
-            'schema': {
-                'type': 'object',
-                'properties': {
-                    'name': {'type': 'string', 'example': 'NewCompany'},
-                    'admin_id': {'type': 'integer', 'example': 1}
-                },
-                'required': ['name']
-            }
-        }
-    ],
-    'responses': {
-        '201': {
-            'description': 'Company created successfully',
-            'schema': {
-                'type': 'object',
-                'properties': {
-                    'message': {'type': 'string'},
-                    'company': {
-                        'type': 'object',
-                        'properties': {
-                            'id': {'type': 'integer'},
-                            'name': {'type': 'string'},
-                            'admin_id': {'type': 'integer'},
-                            'created_at': {'type': 'string', 'format': 'date-time'}
-                        }
-                    }
-                }
-            }
-        },
-        '400': {'description': 'Invalid input or company name already in use'},
-        '403': {'description': 'Unauthorized access'},
-        '404': {'description': 'Admin not found'},
-        '500': {'description': 'Internal server error'}
-    }
-})
 def create_company(current_user):
     if current_user.role not in ['company_admin', 'website_admin']:
         return jsonify({'error': 'Accès non autorisé'}), 403
@@ -108,44 +60,6 @@ def create_company(current_user):
 
 @company_bp.route('/company/<int:company_id>', methods=['GET'])
 @token_required
-@swag_from({
-    'tags': ['Company'],
-    'summary': 'Get company details',
-    'description': 'Retrieve details of a specific company by ID.',
-    'security': [{'Bearer': []}],
-    'parameters': [
-        {
-            'in': 'path',
-            'name': 'company_id',
-            'type': 'integer',
-            'required': True,
-            'description': 'ID of the company'
-        }
-    ],
-    'produces': ['application/json'],
-    'responses': {
-        '200': {
-            'description': 'Company details',
-            'schema': {
-                'type': 'object',
-                'properties': {
-                    'company': {
-                        'type': 'object',
-                        'properties': {
-                            'id': {'type': 'integer'},
-                            'name': {'type': 'string'},
-                            'admin_id': {'type': 'integer'},
-                            'created_at': {'type': 'string', 'format': 'date-time'}
-                        }
-                    }
-                }
-            }
-        },
-        '403': {'description': 'Unauthorized access'},
-        '404': {'description': 'Company not found'},
-        '500': {'description': 'Internal server error'}
-    }
-})
 def get_company(current_user, company_id):
     try:
         company = Company.query.get(company_id)
@@ -170,41 +84,6 @@ def get_company(current_user, company_id):
 
 @company_bp.route('/company/<int:company_id>', methods=['PUT'])
 @token_required
-@swag_from({
-    'tags': ['Company'],
-    'summary': 'Update company details',
-    'description': 'Update company name or admin, restricted to authorized users.',
-    'security': [{'Bearer': []}],
-    'parameters': [
-        {
-            'in': 'path',
-            'name': 'company_id',
-            'type': 'integer',
-            'required': True,
-            'description': 'ID of the company'
-        },
-        {
-            'in': 'body',
-            'name': 'body',
-            'required': True,
-            'schema': {
-                'type': 'object',
-                'properties': {
-                    'name': {'type': 'string', 'example': 'UpdatedCompany'},
-                    'admin_id': {'type': 'integer', 'example': 2}
-                }
-            }
-        }
-    ],
-    'produces': ['application/json'],
-    'responses': {
-        '200': {'description': 'Company updated successfully'},
-        '400': {'description': 'Invalid input or company name already in use'},
-        '403': {'description': 'Unauthorized access'},
-        '404': {'description': 'Company or new admin not found'},
-        '500': {'description': 'Internal server error'}
-    }
-})
 def update_company(current_user, company_id):
     if current_user.role != 'website_admin' and current_user.company_admin.id != company_id:
         return jsonify({'error': 'Accès non autorisé'}), 403
@@ -247,28 +126,6 @@ def update_company(current_user, company_id):
 
 @company_bp.route('/company/<int:company_id>', methods=['DELETE'])
 @token_required
-@swag_from({
-    'tags': ['Company'],
-    'summary': 'Delete a company',
-    'description': 'Delete a company and dissociate its users and documents.',
-    'security': [{'Bearer': []}],
-    'parameters': [
-        {
-            'in': 'path',
-            'name': 'company_id',
-            'type': 'integer',
-            'required': True,
-            'description': 'ID of the company'
-        }
-    ],
-    'produces': ['application/json'],
-    'responses': {
-        '200': {'description': 'Company deleted successfully'},
-        '403': {'description': 'Unauthorized access'},
-        '404': {'description': 'Company not found'},
-        '500': {'description': 'Internal server error'}
-    }
-})
 def delete_company(current_user, company_id):
     if current_user.role != 'website_admin' and current_user.company_admin.id != company_id:
         return jsonify({'error': 'Accès non autorisé'}), 403
@@ -296,37 +153,6 @@ def delete_company(current_user, company_id):
 
 @company_bp.route('/companies', methods=['GET'])
 @token_required
-@swag_from({
-    'tags': ['Company'],
-    'summary': 'List all companies',
-    'description': 'Retrieve a list of all companies, restricted to website_admin.',
-    'security': [{'Bearer': []}],
-    'produces': ['application/json'],
-    'responses': {
-        '200': {
-            'description': 'List of companies',
-            'schema': {
-                'type': 'object',
-                'properties': {
-                    'companies': {
-                        'type': 'array',
-                        'items': {
-                            'type': 'object',
-                            'properties': {
-                                'id': {'type': 'integer'},
-                                'name': {'type': 'string'},
-                                'admin_id': {'type': 'integer'},
-                                'created_at': {'type': 'string', 'format': 'date-time'}
-                            }
-                        }
-                    }
-                }
-            }
-        },
-        '403': {'description': 'Unauthorized access'},
-        '500': {'description': 'Internal server error'}
-    }
-})
 def get_all_companies(current_user):
     if current_user.role != 'website_admin':
         return jsonify({'error': 'Accès non autorisé'}), 403

@@ -15,7 +15,6 @@ auth_bp = Blueprint('auth', __name__)
 # Initialize OAuth
 oauth = OAuth()
 
-
 # Initialize Flask-Mail
 mail = Mail()
 
@@ -149,7 +148,7 @@ def reset_password():
     if not user:
         return jsonify({'error': 'Token invalide'}), 400
 
-    if user.reset_token_expiry < datetime.utcnow():
+    if user.reset_token_expiry < datetime.datetime.utcnow():
         return jsonify({'error': 'Token expiré'}), 400
 
     user.password = bcrypt.generate_password_hash(new_password).decode('utf-8')
