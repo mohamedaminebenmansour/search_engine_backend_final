@@ -9,6 +9,7 @@ from authlib.integrations.flask_client import OAuth
 from flask_mail import Mail, Message
 import secrets
 import urllib.parse
+from utils.auth_utils import token_required
 
 auth_bp = Blueprint('auth', __name__)
 
@@ -22,20 +23,24 @@ def init_auth_routes(app):
     oauth.init_app(app)
     mail.init_app(app)
 
-@auth_bp.route('/register', methods=['POST'])
+@auth_bp.route('/register', methods=['POST', 'OPTIONS'])
 def register():
+    if request.method == "OPTIONS":
+        current_app.logger.debug("Received OPTIONS request for /register")
+        return jsonify({}), 200
+
     data = request.get_json()
     username = data.get('username')
     email = data.get('email')
     password = data.get('password')
     role = data.get('role', 'user')
-    company_id = data.get('company_id')  # Optional: ID of existing company
-    new_company_name = data.get('new_company_name')  # Optional: Name for new company
+    company_id = data.get('company_id')
+    new_company_name = data.get('new_company_name')
 
     if not username or not email or not password:
         return jsonify({'error': 'Tous les champs (username, email, password) sont requis'}), 400
 
-    if role not in ['user', 'company_admin', 'website_admin']:
+    if role not in ['user', 'company_user', 'company_admin', 'website_admin']:
         return jsonify({'error': 'Rôle invalide'}), 400
 
     if User.query.filter_by(email=email).first():
@@ -50,9 +55,11 @@ def register():
     if new_company_name and role == 'company_admin':
         if Company.query.filter_by(name=new_company_name).first():
             return jsonify({'error': 'Nom de l’entreprise déjà utilisé'}), 400
+        db.session.add(new_user)
+        db.session.flush()
         new_company = Company(name=new_company_name, admin_id=new_user.id)
         db.session.add(new_company)
-        db.session.flush()  # Ensure company ID is available
+        db.session.flush()
         new_user.company_id = new_company.id
     elif company_id:
         company = Company.query.get(company_id)
@@ -61,8 +68,10 @@ def register():
         if role == 'company_admin' and company.admin_id != new_user.id:
             return jsonify({'error': 'Cette entreprise a déjà un administrateur'}), 400
         new_user.company_id = company_id
+        db.session.add(new_user)
+    else:
+        db.session.add(new_user)
 
-    db.session.add(new_user)
     db.session.commit()
 
     return jsonify({
@@ -76,12 +85,16 @@ def register():
         }
     }), 201
 
-@auth_bp.route('/login', methods=['POST'])
+@auth_bp.route('/login', methods=['POST', 'OPTIONS'])
 def login():
+    if request.method == "OPTIONS":
+        current_app.logger.debug("Received OPTIONS request for /login")
+        return jsonify({}), 200
+
     data = request.get_json()
     email = data.get('email')
     password = data.get('password')
-
+    
     user = User.query.filter_by(email=email).first()
 
     if not user or not bcrypt.check_password_hash(user.password, password):
@@ -92,7 +105,7 @@ def login():
         'exp': datetime.datetime.utcnow() + datetime.timedelta(hours=24)
     }, SECRET_KEY, algorithm="HS256")
 
-    return jsonify({
+    response = {
         'message': 'Connexion réussie',
         'token': token,
         'user': {
@@ -102,10 +115,16 @@ def login():
             'role': user.role,
             'company_id': user.company_id
         }
-    }), 200
+    }
+    current_app.logger.debug(f"Login response: {response}")
+    return jsonify(response), 200
 
-@auth_bp.route('/forgot-password', methods=['POST'])
+@auth_bp.route('/forgot-password', methods=['POST', 'OPTIONS'])
 def forgot_password():
+    if request.method == "OPTIONS":
+        current_app.logger.debug("Received OPTIONS request for /forgot-password")
+        return jsonify({}), 200
+
     data = request.get_json()
     email = data.get('email')
 
@@ -135,8 +154,12 @@ def forgot_password():
         current_app.logger.error(f"Erreur lors de l'envoi de l'email : {str(e)}")
         return jsonify({'error': 'Erreur lors de l’envoi de l’email'}), 500
 
-@auth_bp.route('/reset-password', methods=['POST'])
+@auth_bp.route('/reset-password', methods=['POST', 'OPTIONS'])
 def reset_password():
+    if request.method == "OPTIONS":
+        current_app.logger.debug("Received OPTIONS request for /reset-password")
+        return jsonify({}), 200
+
     data = request.get_json()
     reset_token = data.get('token')
     new_password = data.get('password')
@@ -207,7 +230,8 @@ def google_callback():
         return redirect('http://localhost:8501/login?error=' + urllib.parse.quote(str(e)))
 
 @auth_bp.route('/companies', methods=['GET'])
-def get_companies():
+@token_required
+def get_companies(current_user):
     try:
         companies = Company.query.all()
         company_data = [{
@@ -219,4 +243,137 @@ def get_companies():
         return jsonify({'companies': company_data}), 200
     except Exception as e:
         current_app.logger.error(f"Error in /companies: {str(e)}", exc_info=True)
+        return jsonify({'error': 'Une erreur interne est survenue.'}), 500
+
+@auth_bp.route('/company/<int:company_id>/users', methods=['GET'])
+@token_required
+def get_company_users(current_user, company_id):
+    try:
+        if current_user.role != 'company_admin' and current_user.role != 'website_admin':
+            return jsonify({'error': 'Accès non autorisé'}), 403
+        if current_user.role == 'company_admin' and current_user.company_id != company_id:
+            return jsonify({'error': 'Vous ne pouvez accéder qu’aux utilisateurs de votre entreprise'}), 403
+
+        company = Company.query.get(company_id)
+        if not company:
+            return jsonify({'error': 'Entreprise non trouvée'}), 404
+
+        users = User.query.filter_by(company_id=company_id).all()
+        user_data = [{
+            'id': user.id,
+            'username': user.username,
+            'email': user.email,
+            'role': user.role
+        } for user in users]
+        return jsonify({'users': user_data}), 200
+    except Exception as e:
+        current_app.logger.error(f"Error in /company/{company_id}/users: {str(e)}", exc_info=True)
+        return jsonify({'error': 'Une erreur interne est survenue.'}), 500
+
+@auth_bp.route('/company/companies', methods=['GET', 'POST'])
+@token_required
+def manage_companies(current_user):
+    if current_user.role != 'website_admin':
+        return jsonify({'error': 'Accès non autorisé'}), 403
+
+    try:
+        if request.method == 'GET':
+            companies = Company.query.all()
+            company_data = [{
+                'id': company.id,
+                'name': company.name,
+                'admin_id': company.admin_id,
+                'created_at': company.created_at.isoformat()
+            } for company in companies]
+            return jsonify({'companies': company_data}), 200
+
+        elif request.method == 'POST':
+            data = request.get_json()
+            name = data.get('name')
+            admin_id = data.get('admin_id')
+
+            if not name:
+                return jsonify({'error': 'Nom de l’entreprise requis'}), 400
+
+            if Company.query.filter_by(name=name).first():
+                return jsonify({'error': 'Nom de l’entreprise déjà utilisé'}), 400
+
+            if admin_id:
+                admin = User.query.get(admin_id)
+                if not admin:
+                    return jsonify({'error': 'Administrateur non trouvé'}), 404
+                if admin.role != 'company_admin':
+                    return jsonify({'error': 'L’utilisateur spécifié n’est pas un company_admin'}), 400
+                if admin.company_id and admin.company_id != new_company.id:
+                    return jsonify({'error': 'Cet administrateur est déjà associé à une autre entreprise'}), 400
+
+            new_company = Company(name=name, admin_id=admin_id)
+            db.session.add(new_company)
+            db.session.flush()
+
+            if admin_id:
+                admin.company_id = new_company.id
+                db.session.commit()
+
+            return jsonify({
+                'message': 'Entreprise créée avec succès',
+                'company': {
+                    'id': new_company.id,
+                    'name': new_company.name,
+                    'admin_id': new_company.admin_id,
+                    'created_at': new_company.created_at.isoformat()
+                }
+            }), 201
+
+    except Exception as e:
+        db.session.rollback()
+        current_app.logger.error(f"Error in /company/companies: {str(e)}", exc_info=True)
+        return jsonify({'error': 'Une erreur interne est survenue.'}), 500
+
+@auth_bp.route('/company/<int:company_id>', methods=['PUT', 'DELETE'])
+@token_required
+def manage_company(current_user, company_id):
+    if current_user.role != 'website_admin' and (current_user.role != 'company_admin' or current_user.company_id != company_id):
+        return jsonify({'error': 'Accès non autorisé'}), 403
+
+    try:
+        company = Company.query.get(company_id)
+        if not company:
+            return jsonify({'error': 'Entreprise non trouvée'}), 404
+
+        if request.method == 'PUT':
+            data = request.get_json()
+            name = data.get('name')
+            admin_id = data.get('admin_id') if current_user.role == 'website_admin' else None
+
+            if not name:
+                return jsonify({'error': 'Nom de l’entreprise requis'}), 400
+
+            if Company.query.filter(Company.name == name, Company.id != company_id).first():
+                return jsonify({'error': 'Nom de l’entreprise déjà utilisé'}), 400
+
+            if admin_id:
+                admin = User.query.get(admin_id)
+                if not admin:
+                    return jsonify({'error': 'Administrateur non trouvé'}), 404
+                if admin.role != 'company_admin':
+                    return jsonify({'error': 'L’utilisateur spécifié n’est pas un company_admin'}), 400
+                if admin.company_id and admin.company_id != company_id:
+                    return jsonify({'error': 'Cet administrateur est déjà associé à une autre entreprise'}), 400
+                company.admin_id = admin_id
+                admin.company_id = company_id
+
+            company.name = name
+            db.session.commit()
+            return jsonify({'message': 'Entreprise mise à jour avec succès'}), 200
+
+        elif request.method == 'DELETE':
+            User.query.filter_by(company_id=company_id).update({'company_id': None})
+            db.session.delete(company)
+            db.session.commit()
+            return jsonify({'message': 'Entreprise supprimée avec succès'}), 200
+
+    except Exception as e:
+        db.session.rollback()
+        current_app.logger.error(f"Error in /company/{company_id}: {str(e)}", exc_info=True)
         return jsonify({'error': 'Une erreur interne est survenue.'}), 500
