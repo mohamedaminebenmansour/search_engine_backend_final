@@ -11,9 +11,15 @@ import os
 from werkzeug.utils import secure_filename
 from sentence_transformers import SentenceTransformer, util
 import PyPDF2
+import chromadb
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 # Initialize sentence-transformers for document search
 model = SentenceTransformer('all-MiniLM-L6-v2')
+
+# Initialize ChromaDB persistent client
+chroma_client = chromadb.PersistentClient(path="./chroma_db")
+collection = chroma_client.get_or_create_collection(name="company_documents")
 
 ALLOWED_EXTENSIONS = {'pdf', 'txt'}
 UPLOAD_FOLDER = 'Uploads'
@@ -51,7 +57,7 @@ class UserService:
             return {"error": "Nom de l’entreprise requis pour le rôle company_admin"}, 400
 
         password_hash = hash_password(password)
-        new_user = User(username=username, email=email, password=password_hash, role=role)
+        new_user = User(username=username, email=email, password=password_hash, role=role, first_login=True)
         db.session.add(new_user)
         db.session.commit()
 
@@ -106,7 +112,8 @@ class UserService:
             "user_id": user.id,
             "username": user.username,
             "role": user.role,
-            "company_id": user.company_id
+            "company_id": user.company_id,
+            "first_login": user.first_login
         }, 200
 
     @staticmethod
@@ -230,10 +237,20 @@ class UserService:
             email=email,
             password=password_hash,
             role=role,
-            company_id=company_id
+            company_id=company_id,
+            first_login=True
         )
         db.session.add(new_user)
         db.session.commit()
+
+        # Send welcome email (unchanged, assuming mail is set up)
+        try:
+            msg = Message('Bienvenue sur la plateforme', sender=current_app.config['MAIL_DEFAULT_SENDER'], recipients=[new_user.email])
+            msg.body = f"Cher {new_user.username},\n\nVotre compte a été créé en tant que {role} pour l'entreprise ID {company_id}. Veuillez vous connecter et mettre à jour vos détails lors de votre première connexion.\n\nLien de connexion : http://localhost:8501/login"
+            mail.send(msg)
+        except Exception as e:
+            current_app.logger.error(f"Erreur lors de l'envoi de l'email de bienvenue : {str(e)}")
+
         return {"message": "Utilisateur créé avec succès", "user_id": new_user.id}, 201
 
     @staticmethod
@@ -326,7 +343,6 @@ class UserService:
             file.save(file_path)
 
             text = ""
-            embedding = None
             if filename.endswith('.pdf'):
                 try:
                     with open(file_path, 'rb') as f:
@@ -334,37 +350,49 @@ class UserService:
                         for page in pdf.pages:
                             extracted_text = page.extract_text()
                             if extracted_text:
-                                text += extracted_text
-                    if text:
-                        embedding = model.encode(text, convert_to_tensor=False).tolist()
-                    else:
-                        current_app.logger.warning(f"No text extracted from PDF: {filename}")
+                                text += extracted_text + "\n"
                 except Exception as e:
-                    current_app.logger.warning(f"Failed to process PDF {filename}: {str(e)}. Saving without embedding.")
+                    current_app.logger.warning(f"Failed to process PDF {filename}: {str(e)}. Saving without text.")
 
             elif filename.endswith('.txt'):
                 try:
                     with open(file_path, 'r', encoding='utf-8') as f:
                         text = f.read()
-                    embedding = model.encode(text, convert_to_tensor=False).tolist()
                 except Exception as e:
-                    current_app.logger.warning(f"Failed to read TXT {filename}: {str(e)}. Saving without embedding.")
+                    current_app.logger.warning(f"Failed to read TXT {filename}: {str(e)}. Saving without text.")
 
+            # Save metadata to SQL
             document = Document(
                 company_id=current_user.company_id,
                 filename=filename,
                 file_path=file_path,
-                uploaded_by=current_user.id,
-                embedding=embedding
+                uploaded_by=current_user.id
             )
             db.session.add(document)
             db.session.commit()
+
+            # Chunk text and add to ChromaDB if text extracted
+            warning = None
+            if text:
+                text_splitter = RecursiveCharacterTextSplitter(chunk_size=800, chunk_overlap=80)
+                chunks = text_splitter.split_text(text)
+                embeddings = [model.encode(chunk).tolist() for chunk in chunks]
+                metadatas = [{"company_id": current_user.company_id, "document_id": document.id, "filename": filename, "chunk_id": i} for i in range(len(chunks))]
+                ids = [f"{document.id}_{i}" for i in range(len(chunks))]
+                collection.add(
+                    embeddings=embeddings,
+                    documents=chunks,
+                    metadatas=metadatas,
+                    ids=ids
+                )
+            else:
+                warning = "Impossible d'extraire le texte pour la recherche"
 
             current_app.logger.info(f"Document uploaded successfully: {filename}, ID: {document.id}")
             return {
                 "message": "Document téléchargé avec succès",
                 "document_id": document.id,
-                "warning": "Impossible d'extraire le texte pour la recherche" if not embedding else None
+                "warning": warning
             }, 201
 
         current_app.logger.error(f"Invalid file type: {file.filename}")
@@ -378,6 +406,15 @@ class UserService:
         document = Document.query.get(document_id)
         if not document or document.company_id != current_user.company_id:
             return {"error": "Document non trouvé ou accès non autorisé"}, 404
+
+        # Delete from ChromaDB
+        results = collection.query(
+            query_texts=["dummy"],  # Dummy query to get all for company
+            n_results=collection.count(),
+            where={"document_id": {"$eq": document.id}}
+        )
+        if results['ids'] and results['ids'][0]:
+            collection.delete(ids=results['ids'][0])
 
         if os.path.exists(document.file_path):
             os.remove(document.file_path)
@@ -394,23 +431,67 @@ class UserService:
         if not query:
             return {"error": "Requête de recherche manquante"}, 400
 
-        query_embedding = model.encode(query, convert_to_tensor=False)
-        documents = Document.query.filter_by(company_id=current_user.company_id).all()
-        results = []
+        query_embedding = model.encode(query).tolist()
+        results = collection.query(
+            query_embeddings=[query_embedding],
+            n_results=10,
+            where={"company_id": {"$eq": current_user.company_id}}
+        )
 
-        for doc in documents:
-            if doc.embedding:
-                doc_embedding = doc.embedding
-                similarity = util.cos_sim(query_embedding, doc_embedding).item()
-                if similarity > 0.5:
-                    results.append({
-                        "id": doc.id,
-                        "filename": doc.filename,
-                        "similarity": similarity
-                    })
+        if not results['ids'] or not results['ids'][0]:
+            return {"results": []}, 200
 
-        results.sort(key=lambda x: x["similarity"], reverse=True)
-        return {"results": results}, 200
+        # Aggregate by document_id, include snippets and similarity
+        doc_results = {}
+        for i, doc_id in enumerate(results['ids'][0]):
+            metadata = results['metadatas'][0][i]
+            document_text = results['documents'][0][i]
+            similarity = results['distances'][0][i]
+            d_id = metadata['document_id']
+            if d_id not in doc_results:
+                doc_results[d_id] = {
+                    "id": d_id,
+                    "filename": metadata['filename'],
+                    "similarity": similarity,
+                    "snippets": []
+                }
+            doc_results[d_id]['snippets'].append(document_text)
+            # Update max similarity
+            if similarity < doc_results[d_id]['similarity']:  # Lower distance = better
+                doc_results[d_id]['similarity'] = similarity
+
+        sorted_results = sorted(doc_results.values(), key=lambda x: x["similarity"])
+        return {"results": sorted_results}, 200
+
+    @staticmethod
+    def get_relevant_document_contents(query, current_user):
+        if not current_user.company_id:
+            return []
+
+        query_embedding = model.encode(query).tolist()
+        results = collection.query(
+            query_embeddings=[query_embedding],
+            n_results=5,  # Top 5 chunks
+            where={"company_id": {"$eq": current_user.company_id}}
+        )
+
+        if not results['ids'] or not results['ids'][0]:
+            return []
+
+        relevant = []
+        seen_docs = set()
+        for i, doc_id in enumerate(results['ids'][0]):
+            metadata = results['metadatas'][0][i]
+            text = results['documents'][0][i]
+            d_id = metadata['document_id']
+            if d_id not in seen_docs:
+                seen_docs.add(d_id)
+                relevant.append({
+                    "filename": metadata['filename'],
+                    "snippet": text[:500] + "..." if len(text) > 500 else text
+                })
+
+        return relevant
 
     @staticmethod
     def get_history(current_user):
@@ -468,3 +549,28 @@ class UserService:
         db.session.delete(history)
         db.session.commit()
         return {"message": "Historique supprimé avec succès"}, 200
+
+    @staticmethod
+    def update_profile(current_user, data):
+        new_username = data.get('username')
+        new_email = data.get('email')
+        new_password = data.get('password')
+
+        if not any([new_username, new_email, new_password]):
+            return {'error': 'Aucune donnée à mettre à jour'}, 400
+
+        if new_username:
+            current_user.username = new_username
+
+        if new_email:
+            if new_email != current_user.email and User.query.filter_by(email=new_email).first():
+                return {'error': 'Email déjà utilisé'}, 400
+            current_user.email = new_email
+
+        if new_password:
+            current_user.password = hash_password(new_password)
+
+        current_user.first_login = False
+        db.session.commit()
+
+        return {'message': 'Profil mis à jour avec succès'}, 200

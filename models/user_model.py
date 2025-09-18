@@ -10,3 +10,4 @@ class User(db.Model):
     company_id = db.Column(db.Integer, db.ForeignKey('companies.id'), nullable=True)
     reset_token = db.Column(db.String(100), nullable=True)
     reset_token_expiry = db.Column(db.DateTime, nullable=True)
+    first_login = db.Column(db.Boolean, default=True)  # New field for first-time login

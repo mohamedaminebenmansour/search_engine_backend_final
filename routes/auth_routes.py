@@ -130,3 +130,13 @@ def manage_company(current_user, company_id):
     except Exception as e:
         current_app.logger.error(f"Error in /company/{company_id}: {str(e)}", exc_info=True)
         return jsonify({'error': 'Une erreur interne est survenue.'}), 500
+@auth_bp.route('/update-profile', methods=['POST'])
+@token_required
+def update_profile(current_user):
+    try:
+        data = request.get_json()
+        result, status = AuthService.update_profile(current_user, data)  # Or UserService if placed there
+        return jsonify(result), status
+    except Exception as e:
+        current_app.logger.error(f"Error in /update-profile: {str(e)}", exc_info=True)
+        return jsonify({'error': 'Une erreur interne est survenue.'}), 500
