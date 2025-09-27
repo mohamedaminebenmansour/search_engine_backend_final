@@ -9,25 +9,26 @@ import json
 from datetime import datetime
 import os
 from werkzeug.utils import secure_filename
-from sentence_transformers import SentenceTransformer, util
 import PyPDF2
-import chromadb
+from langchain_community.vectorstores import FAISS  # For vector store
+from langchain_huggingface import HuggingFaceEmbeddings  # For free embeddings
 from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_core.documents import Document as LangDocument
+from uuid import uuid4  # For generating IDs
 
-# Initialize sentence-transformers for document search
-model = SentenceTransformer('all-MiniLM-L6-v2')
-
-# Initialize ChromaDB persistent client
-chroma_client = chromadb.PersistentClient(path="./chroma_db")
-collection = chroma_client.get_or_create_collection(name="company_documents")
+# Initialize embeddings (free Hugging Face model)
+embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
 
 ALLOWED_EXTENSIONS = {'pdf', 'txt'}
 UPLOAD_FOLDER = 'Uploads'
 MAX_FILE_SIZE = 10 * 1024 * 1024  # 10 MB limit
+FAISS_DB_FOLDER = './faiss_db'  # Directory for per-company FAISS indexes
 
-# Ensure UPLOAD_FOLDER exists
+# Ensure directories exist
 if not os.path.exists(UPLOAD_FOLDER):
     os.makedirs(UPLOAD_FOLDER)
+if not os.path.exists(FAISS_DB_FOLDER):
+    os.makedirs(FAISS_DB_FOLDER)
 
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
@@ -371,20 +372,21 @@ class UserService:
             db.session.add(document)
             db.session.commit()
 
-            # Chunk text and add to ChromaDB if text extracted
+            # Chunk and add to FAISS (per company)
             warning = None
             if text:
                 text_splitter = RecursiveCharacterTextSplitter(chunk_size=800, chunk_overlap=80)
                 chunks = text_splitter.split_text(text)
-                embeddings = [model.encode(chunk).tolist() for chunk in chunks]
-                metadatas = [{"company_id": current_user.company_id, "document_id": document.id, "filename": filename, "chunk_id": i} for i in range(len(chunks))]
-                ids = [f"{document.id}_{i}" for i in range(len(chunks))]
-                collection.add(
-                    embeddings=embeddings,
-                    documents=chunks,
-                    metadatas=metadatas,
-                    ids=ids
-                )
+                documents = [LangDocument(page_content=chunk, metadata={"company_id": current_user.company_id, "document_id": document.id, "filename": filename}) for chunk in chunks]
+                ids = [str(uuid4()) for _ in documents]  # Unique IDs
+
+                faiss_path = os.path.join(FAISS_DB_FOLDER, str(current_user.company_id))
+                if os.path.exists(faiss_path):
+                    vector_store = FAISS.load_local(faiss_path, embeddings, allow_dangerous_deserialization=True)
+                    vector_store.add_documents(documents=documents, ids=ids)
+                else:
+                    vector_store = FAISS.from_documents(documents=documents, embedding=embeddings)
+                vector_store.save_local(faiss_path)
             else:
                 warning = "Impossible d'extraire le texte pour la recherche"
 
@@ -407,14 +409,17 @@ class UserService:
         if not document or document.company_id != current_user.company_id:
             return {"error": "Document non trouvé ou accès non autorisé"}, 404
 
-        # Delete from ChromaDB
-        results = collection.query(
-            query_texts=["dummy"],  # Dummy query to get all for company
-            n_results=collection.count(),
-            where={"document_id": {"$eq": document.id}}
-        )
-        if results['ids'] and results['ids'][0]:
-            collection.delete(ids=results['ids'][0])
+        # Delete from FAISS
+        faiss_path = os.path.join(FAISS_DB_FOLDER, str(current_user.company_id))
+        if os.path.exists(faiss_path):
+            vector_store = FAISS.load_local(faiss_path, embeddings, allow_dangerous_deserialization=True)
+            # Find IDs to delete (filter by metadata)
+            retriever = vector_store.as_retriever(search_kwargs={"filter": {"document_id": document.id}})
+            results = retriever.invoke("dummy query")  # Dummy to fetch docs
+            ids_to_delete = [doc.metadata.get('id') for doc in results if 'id' in doc.metadata]  # Assuming IDs stored in metadata if needed
+            if ids_to_delete:
+                vector_store.delete(ids_to_delete)
+                vector_store.save_local(faiss_path)
 
         if os.path.exists(document.file_path):
             os.remove(document.file_path)
@@ -431,34 +436,31 @@ class UserService:
         if not query:
             return {"error": "Requête de recherche manquante"}, 400
 
-        query_embedding = model.encode(query).tolist()
-        results = collection.query(
-            query_embeddings=[query_embedding],
-            n_results=10,
-            where={"company_id": {"$eq": current_user.company_id}}
-        )
-
-        if not results['ids'] or not results['ids'][0]:
+        faiss_path = os.path.join(FAISS_DB_FOLDER, str(current_user.company_id))
+        if not os.path.exists(faiss_path):
             return {"results": []}, 200
 
-        # Aggregate by document_id, include snippets and similarity
+        vector_store = FAISS.load_local(faiss_path, embeddings, allow_dangerous_deserialization=True)
+        results = vector_store.similarity_search_with_score(query, k=10, filter={"company_id": current_user.company_id})
+
+        if not results:
+            return {"results": []}, 200
+
+        # Aggregate by document_id
         doc_results = {}
-        for i, doc_id in enumerate(results['ids'][0]):
-            metadata = results['metadatas'][0][i]
-            document_text = results['documents'][0][i]
-            similarity = results['distances'][0][i]
+        for doc, score in results:
+            metadata = doc.metadata
             d_id = metadata['document_id']
             if d_id not in doc_results:
                 doc_results[d_id] = {
                     "id": d_id,
                     "filename": metadata['filename'],
-                    "similarity": similarity,
+                    "similarity": score,
                     "snippets": []
                 }
-            doc_results[d_id]['snippets'].append(document_text)
-            # Update max similarity
-            if similarity < doc_results[d_id]['similarity']:  # Lower distance = better
-                doc_results[d_id]['similarity'] = similarity
+            doc_results[d_id]['snippets'].append(doc.page_content)
+            if score < doc_results[d_id]['similarity']:
+                doc_results[d_id]['similarity'] = score
 
         sorted_results = sorted(doc_results.values(), key=lambda x: x["similarity"])
         return {"results": sorted_results}, 200
@@ -468,27 +470,27 @@ class UserService:
         if not current_user.company_id:
             return []
 
-        query_embedding = model.encode(query).tolist()
-        results = collection.query(
-            query_embeddings=[query_embedding],
-            n_results=5,  # Top 5 chunks
-            where={"company_id": {"$eq": current_user.company_id}}
-        )
+        faiss_path = os.path.join(FAISS_DB_FOLDER, str(current_user.company_id))
+        if not os.path.exists(faiss_path):
+            return []
 
-        if not results['ids'] or not results['ids'][0]:
+        vector_store = FAISS.load_local(faiss_path, embeddings, allow_dangerous_deserialization=True)
+        results = vector_store.similarity_search_with_score(query, k=5, filter={"company_id": current_user.company_id})
+
+        if not results:
             return []
 
         relevant = []
         seen_docs = set()
-        for i, doc_id in enumerate(results['ids'][0]):
-            metadata = results['metadatas'][0][i]
-            text = results['documents'][0][i]
+        for doc, _ in results:
+            metadata = doc.metadata
             d_id = metadata['document_id']
             if d_id not in seen_docs:
                 seen_docs.add(d_id)
+                snippet = doc.page_content[:500] + "..." if len(doc.page_content) > 500 else doc.page_content
                 relevant.append({
                     "filename": metadata['filename'],
-                    "snippet": text[:500] + "..." if len(text) > 500 else text
+                    "snippet": snippet
                 })
 
         return relevant

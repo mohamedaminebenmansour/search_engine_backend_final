@@ -8,6 +8,7 @@ from services.user_service import UserService  # Import for document retrieval
 import re
 import json
 from datetime import datetime, timedelta
+from langchain_ollama import ChatOllama  # For free local LLM
 
 class ChatService:
     @staticmethod
@@ -78,21 +79,32 @@ class ChatService:
         detected_domain = domain
 
         if current_user and current_user.role == 'company_user':
-            # Simplified for company_user: only search company documents
-            print(f"Company user detected, searching documents for query: {query}")
+            # RAG for company_user using LangChain, FAISS, Ollama
+            print(f"Company user detected, performing RAG on documents for query: {query}")
             relevant_docs = UserService.get_relevant_document_contents(query, current_user)
             if relevant_docs:
-                print(f"Found {len(relevant_docs)} relevant documents")
-                document_section = "**Contenu pertinent des documents de votre entreprise :**\n" + "\n".join(
-                    [f"- {doc['filename']}: {doc['snippet']}" for doc in relevant_docs]
-                )
-                formatted_answer = document_section
-                sources = [doc['filename'] for doc in relevant_docs]  # Use filenames as sources
+                print(f"Found {len(relevant_docs)} relevant document chunks")
+                context = "\n\n".join([doc['snippet'] for doc in relevant_docs])
+                # Generate response with Ollama (free local LLM)
+                llm = ChatOllama(model=model)
+                prompt_template = """
+                Answer the question based only on the following context from company documents.
+                If the answer is not in the context, say "Aucun contenu pertinent trouvé dans les documents de votre entreprise."
+                Be detailed and helpful.
+
+                Context: {context}
+
+                Question: {query}
+                """
+                prompt = prompt_template.format(context=context, query=query)
+                response = llm.invoke(prompt)
+                formatted_answer = ChatService.format_answer_for_readability(response.content)
+                sources = list(set([doc['filename'] for doc in relevant_docs]))
             else:
                 print("No relevant documents found")
                 formatted_answer = "Aucun contenu pertinent trouvé dans les documents de votre entreprise."
         else:
-            # Use hybrid_search for other roles
+            # Use hybrid_search for other roles (unchanged)
             print("Non-company user, using hybrid search")
             try:
                 result = hybrid_search(query=query, user_id=user_id if current_user else None, model=model, domain=domain)
@@ -114,6 +126,7 @@ class ChatService:
             "detected_domain": detected_domain
         }
 
+        # History saving logic (unchanged)
         if current_user and user_id:
             try:
                 latest_history = db.session.query(History).filter_by(user_id=user_id).order_by(History.created_at.desc()).first()
