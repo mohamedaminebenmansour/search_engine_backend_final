@@ -78,7 +78,7 @@ class ChatService:
         sources = []
         detected_domain = domain
 
-        if current_user and current_user.role == 'company_user':
+        if current_user and (current_user.role == 'company_user' or current_user =='company_admin') :
             # RAG for company_user using LangChain, FAISS, Ollama
             print(f"Company user detected, performing RAG on documents for query: {query}")
             relevant_docs = UserService.get_relevant_document_contents(query, current_user)

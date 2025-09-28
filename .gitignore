@@ -38,6 +38,9 @@ htmlcov/
 
 # Frontend dependencies (if any in backend)
 node_modules/
+faiss_db/
+chroma_db/
+Uploads/
 
 # macOS
 .DS_Store
