@@ -36,7 +36,7 @@ def update_company(current_user, company_id):
         current_app.logger.error(f"Error in /company/{company_id} PUT: {str(e)}", exc_info=True)
         return jsonify({'error': 'Une erreur interne est survenue.'}), 500
 
-@company_bp.route('/company/<int:company_id>', methods=['DELETE'])
+@company_bp.route('/<int:company_id>', methods=['DELETE'])
 @token_required
 def delete_company(current_user, company_id):
     try:

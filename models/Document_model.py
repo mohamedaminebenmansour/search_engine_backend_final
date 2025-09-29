@@ -1,5 +1,6 @@
 from extensions import db
 from datetime import datetime
+
 class Document(db.Model):
     __tablename__ = 'documents'
     id = db.Column(db.Integer, primary_key=True)
@@ -11,5 +12,5 @@ class Document(db.Model):
     embedding = db.Column(db.JSON, nullable=True)  # Store document embeddings for AI search
 
     # Relationships
-    company = db.relationship('Company', backref='documents')
-    uploader = db.relationship('User', backref='uploaded_documents')
+    company = db.relationship('Company', backref=db.backref('documents', cascade='all, delete-orphan'))
+    uploader = db.relationship('User', backref=db.backref('uploaded_documents', cascade='all, delete-orphan'))

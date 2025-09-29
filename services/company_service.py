@@ -103,23 +103,30 @@ class CompanyService:
 
     @staticmethod
     def delete_company(current_user, company_id):
+        current_app.logger.info(f"Starting delete_company service for company_id: {company_id}")
+        current_app.logger.info(f"Current user role: {current_user.role}, company_id: {current_user.company_id}")
+        
         if current_user.role != 'website_admin' and current_user.company_id != company_id:
+            current_app.logger.warning("Access denied in delete_company")
             return {'error': 'Accès non autorisé'}, 403
 
         company = Company.query.get(company_id)
         if not company:
+            current_app.logger.warning(f"Company not found: {company_id}")
             return {'error': 'Entreprise non trouvée'}, 404
 
-        users = User.query.filter_by(company_id=company_id).all()
-        for user in users:
-            user.company_id = None
-
-        Document.query.filter_by(company_id=company_id).delete()
-
+        current_app.logger.info(f"Found company: {company.name}, admin_id: {company.admin_id}")
+        
+        # Break circular dependency by nullifying admin_id
+        company.admin_id = None
+        db.session.flush()  # Apply the nullification immediately
+        
+        current_app.logger.info("Admin_id nullified, attempting to delete company")
         db.session.delete(company)
+        current_app.logger.info("Company deleted from session, committing...")
         db.session.commit()
+        current_app.logger.info("Commit successful")
         return {'message': 'Entreprise supprimée avec succès'}, 200
-
     @staticmethod
     def get_all_companies(current_user):
         if current_user.role != 'website_admin':
