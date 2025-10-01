@@ -9,6 +9,7 @@ import re
 import json
 from datetime import datetime, timedelta
 from langchain_ollama import ChatOllama  # For free local LLM
+import os  # Added for file existence checks
 
 class ChatService:
     @staticmethod
@@ -78,10 +79,23 @@ class ChatService:
         sources = []
         detected_domain = domain
 
-        if current_user and (current_user.role == 'company_user' or current_user =='company_admin') :
+        if current_user and current_user.role in ['company_user', 'company_admin']:  # Fixed role check
             # RAG for company_user using LangChain, FAISS, Ollama
             print(f"Company user detected, performing RAG on documents for query: {query}")
-            relevant_docs = UserService.get_relevant_document_contents(query, current_user)
+            relevant_docs = []
+            try:
+                faiss_path = f"faiss_db/{current_user.company_id}"
+                index_file = os.path.join(faiss_path, "index.faiss")
+                if not os.path.exists(index_file):
+                    raise FileNotFoundError(f"FAISS index file not found at {index_file}")
+                relevant_docs = UserService.get_relevant_document_contents(query, current_user)
+            except (FileNotFoundError, RuntimeError) as e:
+                print(f"Error loading FAISS index (likely missing file): {str(e)}")
+                # Fall back to no documents without crashing
+            except Exception as e:
+                current_app.logger.error(f"Unexpected error in RAG: {str(e)}")
+                raise  # Re-raise other errors for debugging
+
             if relevant_docs:
                 print(f"Found {len(relevant_docs)} relevant document chunks")
                 context = "\n\n".join([doc['snippet'] for doc in relevant_docs])
@@ -101,7 +115,7 @@ class ChatService:
                 formatted_answer = ChatService.format_answer_for_readability(response.content)
                 sources = list(set([doc['filename'] for doc in relevant_docs]))
             else:
-                print("No relevant documents found")
+                print("No relevant documents found or index missing")
                 formatted_answer = "Aucun contenu pertinent trouvé dans les documents de votre entreprise."
         else:
             # Use hybrid_search for other roles (unchanged)

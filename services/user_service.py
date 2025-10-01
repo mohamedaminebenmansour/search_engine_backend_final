@@ -381,11 +381,21 @@ class UserService:
                 ids = [str(uuid4()) for _ in documents]  # Unique IDs
 
                 faiss_path = os.path.join(FAISS_DB_FOLDER, str(current_user.company_id))
-                if os.path.exists(faiss_path):
-                    vector_store = FAISS.load_local(faiss_path, embeddings, allow_dangerous_deserialization=True)
-                    vector_store.add_documents(documents=documents, ids=ids)
+                index_file = os.path.join(faiss_path, 'index.faiss')
+
+                if not os.path.exists(faiss_path):
+                    os.makedirs(faiss_path)
+
+                if os.path.exists(index_file):
+                    try:
+                        vector_store = FAISS.load_local(faiss_path, embeddings, allow_dangerous_deserialization=True)
+                        vector_store.add_documents(documents=documents, ids=ids)
+                    except Exception as e:
+                        current_app.logger.error(f"Error loading existing FAISS index: {str(e)}. Creating new index.")
+                        vector_store = FAISS.from_documents(documents=documents, embedding=embeddings)
                 else:
                     vector_store = FAISS.from_documents(documents=documents, embedding=embeddings)
+
                 vector_store.save_local(faiss_path)
             else:
                 warning = "Impossible d'extraire le texte pour la recherche"
@@ -409,17 +419,21 @@ class UserService:
         if not document or document.company_id != current_user.company_id:
             return {"error": "Document non trouvé ou accès non autorisé"}, 404
 
-        # Delete from FAISS
+        # Delete from FAISS if index exists
         faiss_path = os.path.join(FAISS_DB_FOLDER, str(current_user.company_id))
-        if os.path.exists(faiss_path):
-            vector_store = FAISS.load_local(faiss_path, embeddings, allow_dangerous_deserialization=True)
-            # Find IDs to delete (filter by metadata)
-            retriever = vector_store.as_retriever(search_kwargs={"filter": {"document_id": document.id}})
-            results = retriever.invoke("dummy query")  # Dummy to fetch docs
-            ids_to_delete = [doc.metadata.get('id') for doc in results if 'id' in doc.metadata]  # Assuming IDs stored in metadata if needed
-            if ids_to_delete:
-                vector_store.delete(ids_to_delete)
-                vector_store.save_local(faiss_path)
+        index_file = os.path.join(faiss_path, 'index.faiss')
+        if os.path.exists(index_file):
+            try:
+                vector_store = FAISS.load_local(faiss_path, embeddings, allow_dangerous_deserialization=True)
+                # Find IDs to delete (filter by metadata)
+                retriever = vector_store.as_retriever(search_kwargs={"filter": {"document_id": document.id}})
+                results = retriever.invoke("dummy query")  # Dummy to fetch docs
+                ids_to_delete = [doc.metadata.get('id') for doc in results if 'id' in doc.metadata]  # Assuming IDs stored in metadata if needed
+                if ids_to_delete:
+                    vector_store.delete(ids_to_delete)
+                    vector_store.save_local(faiss_path)
+            except Exception as e:
+                current_app.logger.error(f"Error deleting from FAISS: {str(e)}. Skipping FAISS deletion.")
 
         if os.path.exists(document.file_path):
             os.remove(document.file_path)
@@ -437,11 +451,17 @@ class UserService:
             return {"error": "Requête de recherche manquante"}, 400
 
         faiss_path = os.path.join(FAISS_DB_FOLDER, str(current_user.company_id))
-        if not os.path.exists(faiss_path):
+        index_file = os.path.join(faiss_path, 'index.faiss')
+        if not os.path.exists(index_file):
+            current_app.logger.debug(f"No FAISS index file at {index_file}")
             return {"results": []}, 200
 
-        vector_store = FAISS.load_local(faiss_path, embeddings, allow_dangerous_deserialization=True)
-        results = vector_store.similarity_search_with_score(query, k=10, filter={"company_id": current_user.company_id})
+        try:
+            vector_store = FAISS.load_local(faiss_path, embeddings, allow_dangerous_deserialization=True)
+            results = vector_store.similarity_search_with_score(query, k=10, filter={"company_id": current_user.company_id})
+        except Exception as e:
+            current_app.logger.error(f"Error loading or searching FAISS: {str(e)}")
+            return {"error": "Erreur lors de la recherche dans les documents"}, 500
 
         if not results:
             return {"results": []}, 200
@@ -471,11 +491,17 @@ class UserService:
             return []
 
         faiss_path = os.path.join(FAISS_DB_FOLDER, str(current_user.company_id))
-        if not os.path.exists(faiss_path):
+        index_file = os.path.join(faiss_path, 'index.faiss')
+        if not os.path.exists(index_file):
+            current_app.logger.debug(f"No FAISS index file at {index_file}")
             return []
 
-        vector_store = FAISS.load_local(faiss_path, embeddings, allow_dangerous_deserialization=True)
-        results = vector_store.similarity_search_with_score(query, k=5, filter={"company_id": current_user.company_id})
+        try:
+            vector_store = FAISS.load_local(faiss_path, embeddings, allow_dangerous_deserialization=True)
+            results = vector_store.similarity_search_with_score(query, k=5, filter={"company_id": current_user.company_id})
+        except Exception as e:
+            current_app.logger.error(f"Error loading or searching FAISS: {str(e)}")
+            return []
 
         if not results:
             return []
