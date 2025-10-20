@@ -10,6 +10,7 @@ import json
 from datetime import datetime, timedelta
 from langchain_ollama import ChatOllama  # For free local LLM
 import os  # Added for file existence checks
+import traceback  # Added for error tracing
 
 class ChatService:
     @staticmethod
@@ -80,42 +81,47 @@ class ChatService:
         detected_domain = domain
 
         if current_user and current_user.role in ['company_user', 'company_admin']:  # Fixed role check
-            # RAG for company_user using LangChain, FAISS, Ollama
-            print(f"Company user detected, performing RAG on documents for query: {query}")
+            # Improved RAG for company_user using LangChain, FAISS, Ollama
+            print(f"Company user detected, performing improved RAG on company-specific documents for query: {query}")
             relevant_docs = []
             try:
                 faiss_path = f"faiss_db/{current_user.company_id}"
                 index_file = os.path.join(faiss_path, "index.faiss")
                 if not os.path.exists(index_file):
-                    raise FileNotFoundError(f"FAISS index file not found at {index_file}")
+                    raise FileNotFoundError(f"FAISS index file not found at {index_file} – no documents indexed yet for this company.")
+                print("DEBUG: Calling get_relevant_document_contents")  # Added debug
                 relevant_docs = UserService.get_relevant_document_contents(query, current_user)
-            except (FileNotFoundError, RuntimeError) as e:
-                print(f"Error loading FAISS index (likely missing file): {str(e)}")
-                # Fall back to no documents without crashing
+                print(f"DEBUG: Got {len(relevant_docs)} relevant docs")  # Added debug
             except Exception as e:
+                print("DEBUG: RAG error:", str(e))  # Added debug
+                print(traceback.format_exc())
                 current_app.logger.error(f"Unexpected error in RAG: {str(e)}")
-                raise  # Re-raise other errors for debugging
+                # Fall back to no documents without crashing
 
             if relevant_docs:
-                print(f"Found {len(relevant_docs)} relevant document chunks")
+                print(f"Found {len(relevant_docs)} relevant document chunks from company-specific vector DB")
                 context = "\n\n".join([doc['snippet'] for doc in relevant_docs])
-                # Generate response with Ollama (free local LLM)
+                # Generate response with Ollama (free local LLM) using improved prompt
                 llm = ChatOllama(model=model)
                 prompt_template = """
-                Answer the question based only on the following context from company documents.
-                If the answer is not in the context, say "Aucun contenu pertinent trouvé dans les documents de votre entreprise."
-                Be detailed and helpful.
-
-                Context: {context}
-
-                Question: {query}
+                You are a helpful assistant specialized in answering questions based solely on the provided company documents.
+                Use only the information from the context below to formulate your answer. Be detailed, accurate, and concise.
+                Structure your response clearly: start with a direct answer, then explain step-by-step if needed, and end with any relevant suggestions.
+                If the query is not fully answered by the context, state what is known and suggest checking additional documents.
+                If no relevant information is in the context, respond with: "Aucun contenu pertinent trouvé dans les documents de votre entreprise."
+                
+                Context from company documents: {context}
+                
+                User Query: {query}
+                
+                Answer:
                 """
                 prompt = prompt_template.format(context=context, query=query)
                 response = llm.invoke(prompt)
                 formatted_answer = ChatService.format_answer_for_readability(response.content)
                 sources = list(set([doc['filename'] for doc in relevant_docs]))
             else:
-                print("No relevant documents found or index missing")
+                print("No relevant documents found or index missing for this company")
                 formatted_answer = "Aucun contenu pertinent trouvé dans les documents de votre entreprise."
         else:
             # Use hybrid_search for other roles (unchanged)

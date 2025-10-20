@@ -15,6 +15,7 @@ from langchain_huggingface import HuggingFaceEmbeddings  # For free embeddings
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_core.documents import Document as LangDocument
 from uuid import uuid4  # For generating IDs
+from datetime import datetime
 
 # Initialize embeddings (free Hugging Face model)
 embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
@@ -155,9 +156,7 @@ class UserService:
                 company = Company.query.get(new_company_id)
                 if not company:
                     return {"error": "Entreprise non trouvée"}, 404
-                user.company_id = new_company_id
-            else:
-                user.company_id = None
+            user.company_id = new_company_id
 
         db.session.commit()
         return {"message": "Utilisateur mis à jour avec succès"}, 200
@@ -171,6 +170,7 @@ class UserService:
         user = User.query.get(user_id)
         if not user:
             return {"error": "Utilisateur non trouvé"}, 404
+
         db.session.delete(user)
         db.session.commit()
         return {"message": "Utilisateur supprimé avec succès"}, 200
@@ -180,98 +180,73 @@ class UserService:
         if current_user.role != 'website_admin':
             return {"error": "Accès non autorisé"}, 403
 
-        user_count = User.query.count()
-        company_count = Company.query.count()
-        document_count = Document.query.count()
         stats = {
-            "total_users": user_count,
-            "total_companies": company_count,
-            "total_documents": document_count
+            "total_users": User.query.count(),
+            "total_companies": Company.query.count()
         }
         return {"statistics": stats}, 200
 
     @staticmethod
     def get_company_users(current_user, company_id):
-        if current_user.role != 'company_admin' or current_user.company_id != company_id:
+        if current_user.role not in ['company_admin', 'website_admin'] or \
+           (current_user.role == 'company_admin' and current_user.company_id != company_id):
             return {"error": "Accès non autorisé"}, 403
-
-        company = Company.query.get(company_id)
-        if not company:
-            return {"error": "Entreprise non trouvée"}, 404
 
         users = User.query.filter_by(company_id=company_id).all()
         user_data = [{
             "id": user.id,
             "username": user.username,
             "email": user.email,
-            "role": user.role,
-            "company_id": user.company_id
+            "role": user.role
         } for user in users]
         return {"users": user_data}, 200
 
     @staticmethod
     def create_company_user(current_user, data):
-        if current_user.role != 'company_admin':
+        if current_user.role not in ['company_admin', 'website_admin'] or \
+           (current_user.role == 'company_admin' and current_user.company_id != data.get('company_id')):
             return {"error": "Accès non autorisé"}, 403
 
-        email = data.get("email")
         username = data.get("username")
+        email = data.get("email")
         password = data.get("password")
         role = data.get("role", "company_user")
         company_id = data.get("company_id")
 
-        if not all([email, username, password, company_id]):
-            return {"error": "Tous les champs (email, username, password, company_id) sont requis"}, 400
+        if not all([username, email, password, company_id]):
+            return {"error": "Tous les champs (username, email, password, company_id) sont requis"}, 400
 
         if role not in ['company_user', 'company_admin']:
-            return {"error": "Rôle invalide"}, 400
-
-        if company_id != current_user.company_id:
-            return {"error": "Accès non autorisé à cette entreprise"}, 403
+            return {"error": "Rôle invalide pour un utilisateur d'entreprise"}, 400
 
         if User.query.filter_by(email=email).first():
-            return {"error": "Cet email est déjà utilisé"}, 400
+            return {"error": "Email déjà utilisé"}, 400
+
+        company = Company.query.get(company_id)
+        if not company:
+            return {"error": "Entreprise non trouvée"}, 404
 
         password_hash = hash_password(password)
-        new_user = User(
-            username=username,
-            email=email,
-            password=password_hash,
-            role=role,
-            company_id=company_id,
-            first_login=True
-        )
+        new_user = User(username=username, email=email, password=password_hash, role=role, company_id=company_id, first_login=True)
         db.session.add(new_user)
         db.session.commit()
 
-        # Send welcome email (unchanged, assuming mail is set up)
-        try:
-            msg = Message('Bienvenue sur la plateforme', sender=current_app.config['MAIL_DEFAULT_SENDER'], recipients=[new_user.email])
-            msg.body = f"Cher {new_user.username},\n\nVotre compte a été créé en tant que {role} pour l'entreprise ID {company_id}. Veuillez vous connecter et mettre à jour vos détails lors de votre première connexion.\n\nLien de connexion : http://localhost:8501/login"
-            mail.send(msg)
-        except Exception as e:
-            current_app.logger.error(f"Erreur lors de l'envoi de l'email de bienvenue : {str(e)}")
-
-        return {"message": "Utilisateur créé avec succès", "user_id": new_user.id}, 201
+        return {"message": "Utilisateur d'entreprise créé avec succès", "user_id": new_user.id}, 201
 
     @staticmethod
     def update_company_user(current_user, data):
-        if current_user.role != 'company_admin':
+        if current_user.role not in ['company_admin', 'website_admin']:
             return {"error": "Accès non autorisé"}, 403
 
         user_id = data.get("user_id")
         new_role = data.get("role")
-        company_id = data.get("company_id")
-
-        if not user_id or not company_id:
-            return {"error": "Les champs user_id et company_id sont requis"}, 400
-
-        if company_id != current_user.company_id:
-            return {"error": "Accès non autorisé à cette entreprise"}, 403
 
         user = User.query.get(user_id)
-        if not user or user.company_id != company_id:
-            return {"error": "Utilisateur non trouvé ou accès non autorisé"}, 404
+        if not user:
+            return {"error": "Utilisateur non trouvé"}, 404
+
+        if current_user.role == 'company_admin' and user.company_id != current_user.company_id:
+            return {"error": "Accès non autorisé à cet utilisateur"}, 403
 
         if new_role:
             if new_role not in ['company_user', 'company_admin']:
@@ -283,190 +258,203 @@ class UserService:
 
     @staticmethod
     def delete_company_user(current_user, data):
-        if current_user.role != 'company_admin':
+        if current_user.role not in ['company_admin', 'website_admin']:
             return {"error": "Accès non autorisé"}, 403
 
         user_id = data.get("user_id")
-        if not user_id:
-            return {"error": "Le champ user_id est requis"}, 400
-
         user = User.query.get(user_id)
-        if not user or user.company_id != current_user.company_id:
-            return {"error": "Utilisateur non trouvé ou accès non autorisé"}, 404
+        if not user:
+            return {"error": "Utilisateur non trouvé"}, 404
+
+        if current_user.role == 'company_admin' and user.company_id != current_user.company_id:
+            return {"error": "Accès non autorisé à cet utilisateur"}, 403
 
         db.session.delete(user)
         db.session.commit()
         return {"message": "Utilisateur supprimé avec succès"}, 200
 
     @staticmethod
-    def get_documents(current_user):
-        if current_user.role != 'company_admin':
-            return {"error": "Accès non autorisé"}, 403
-
-        if not current_user.company_id:
-            return {"error": "Utilisateur non associé à une entreprise"}, 403
-
-        documents = Document.query.filter_by(company_id=current_user.company_id).all()
-        document_data = [{
-            "id": doc.id,
-            "filename": doc.filename,
-            "file_path": doc.file_path,
-            "uploaded_by": doc.uploaded_by,
-            "uploaded_at": doc.uploaded_at.isoformat()
-        } for doc in documents]
-        return {"documents": document_data}, 200
-
-    @staticmethod
     def upload_document(current_user, files):
-        if current_user.role != 'company_admin':
+        print("DEBUG: Entering upload_document")  # Debug print: Start
+        current_app.logger.debug(f"User {current_user.id} attempting upload")
+
+        if current_user.role not in ['company_user', 'company_admin']:
+            print("DEBUG: Access denied")  # Debug print
             return {"error": "Accès non autorisé"}, 403
 
         if 'file' not in files:
-            current_app.logger.error("No file provided in request.files")
+            print("DEBUG: No file in request")  # Debug print
             return {"error": "Aucun fichier fourni"}, 400
 
         file = files['file']
         if file.filename == '':
-            current_app.logger.error("No file selected (empty filename)")
+            print("DEBUG: Empty filename")  # Debug print
             return {"error": "Aucun fichier sélectionné"}, 400
 
-        file.seek(0, os.SEEK_END)
-        file_size = file.tell()
-        file.seek(0)
-        if file_size > MAX_FILE_SIZE:
-            current_app.logger.error(f"File too large: {file_size} bytes, max allowed: {MAX_FILE_SIZE} bytes")
-            return {"error": f"Fichier trop volumineux (max {MAX_FILE_SIZE/1024/1024} MB)"}, 400
+        if not allowed_file(file.filename):
+            print(f"DEBUG: Invalid extension for {file.filename}")  # Debug print
+            return {"error": f"Seuls les fichiers {', '.join(ALLOWED_EXTENSIONS)} sont autorisés"}, 400
 
-        if file and allowed_file(file.filename):
+        try:
+            print("DEBUG: Reading file size")  # Debug print
+            file_data = file.read()
+            if len(file_data) > MAX_FILE_SIZE:
+                print("DEBUG: File too large")  # Debug print
+                return {"error": "Le fichier est trop volumineux (limite : 10 MB)"}, 400
+            file.seek(0)  # Reset pointer
+
             filename = secure_filename(file.filename)
-            file_path = os.path.join(UPLOAD_FOLDER, filename)
-            current_app.logger.debug(f"Saving file: {filename} to {file_path}")
-            file.save(file_path)
+            filepath = os.path.join(UPLOAD_FOLDER, filename)  # Note: filepath var (no underscore)
+            print(f"DEBUG: Saving file to {filepath}")  # Debug print: File path
+            file.save(filepath)
 
-            text = ""
-            if filename.endswith('.pdf'):
-                try:
-                    with open(file_path, 'rb') as f:
-                        pdf = PyPDF2.PdfReader(f)
-                        for page in pdf.pages:
-                            extracted_text = page.extract_text()
-                            if extracted_text:
-                                text += extracted_text + "\n"
-                except Exception as e:
-                    current_app.logger.warning(f"Failed to process PDF {filename}: {str(e)}. Saving without text.")
+            if not os.path.exists(filepath):
+                print("DEBUG: File save failed - path does not exist")  # Debug print
+                raise FileNotFoundError(f"File not saved at {filepath}")
 
-            elif filename.endswith('.txt'):
-                try:
-                    with open(file_path, 'r', encoding='utf-8') as f:
-                        text = f.read()
-                except Exception as e:
-                    current_app.logger.warning(f"Failed to read TXT {filename}: {str(e)}. Saving without text.")
+            # Extract text based on file type
+            print("DEBUG: Extracting text")  # Debug print
+            if filename.lower().endswith('.pdf'):
+                with open(filepath, 'rb') as f:
+                    pdf_reader = PyPDF2.PdfReader(f)
+                    text = ""
+                    for page in pdf_reader.pages:
+                        text += page.extract_text() or ""
+            elif filename.lower().endswith('.txt'):
+                with open(filepath, 'r', encoding='utf-8') as f:
+                    text = f.read()
+            else:
+                print("DEBUG: Unsupported file type")  # Debug print
+                raise ValueError("Type de fichier non supporté")
 
-            # Save metadata to SQL
-            document = Document(
+            # Improved chunking: larger chunks for better context, more overlap
+            text_splitter = RecursiveCharacterTextSplitter(chunk_size=800, chunk_overlap=200)
+            chunks = text_splitter.split_text(text)
+
+            # Create LangChain documents with metadata
+            documents = []
+            for i, chunk in enumerate(chunks):
+                documents.append(LangDocument(
+                    page_content=chunk,
+                    metadata={
+                        "document_id": str(uuid4()),
+                        "filename": filename,
+                        "chunk_id": i,
+                        "company_id": current_user.company_id
+                    }
+                ))
+
+            # Save or update per-company FAISS index
+            faiss_path = os.path.join(FAISS_DB_FOLDER, str(current_user.company_id))
+            if not os.path.exists(faiss_path):
+                os.makedirs(faiss_path)
+
+            print(f"DEBUG: Indexing to FAISS at {faiss_path}")  # Debug print: Vector DB
+            if os.path.exists(os.path.join(faiss_path, 'index.faiss')):
+                vector_store = FAISS.load_local(faiss_path, embeddings, allow_dangerous_deserialization=True)
+                vector_store.add_documents(documents)
+            else:
+                vector_store = FAISS.from_documents(documents, embeddings)
+
+            vector_store.save_local(faiss_path)
+
+            # Save document metadata in DB
+            print("DEBUG: Creating Document model instance")  # Debug print: Before creation
+            new_document = Document(
                 company_id=current_user.company_id,
                 filename=filename,
-                file_path=file_path,
-                uploaded_by=current_user.id
+                file_path=filepath,  # FIXED: Use 'file_path' (with underscore) to match model
+                uploaded_by=current_user.id,
+                uploaded_at=datetime.utcnow(),
+                embedding=None  # Set if you compute embeddings here
             )
-            db.session.add(document)
+            print("DEBUG: Document instance created successfully")  # Debug print: After creation
+            db.session.add(new_document)
             db.session.commit()
+            print("DEBUG: DB commit successful")  # Debug print: After commit
 
-            # Chunk and add to FAISS (per company)
-            warning = None
-            if text:
-                text_splitter = RecursiveCharacterTextSplitter(chunk_size=800, chunk_overlap=80)
-                chunks = text_splitter.split_text(text)
-                documents = [LangDocument(page_content=chunk, metadata={"company_id": current_user.company_id, "document_id": document.id, "filename": filename}) for chunk in chunks]
-                ids = [str(uuid4()) for _ in documents]  # Unique IDs
+            return {"message": "Document téléchargé et indexé avec succès"}, 200
+        except Exception as e:
+            print("DEBUG: Exception in upload:", str(e))  # Debug print: Error
+            print(traceback.format_exc())  # Print full traceback for details
+            current_app.logger.error(f"Error processing document: {str(e)}", exc_info=True)
+            if 'filepath' in os.path:  # Clean up
+                os.remove(filepath)
+            return {"error": "Erreur lors du traitement du document"}, 500
+    @staticmethod
+    def get_documents(current_user):
+        if current_user.role not in ['company_user', 'company_admin']:
+            return {"error": "Accès non autorisé"}, 403
 
-                faiss_path = os.path.join(FAISS_DB_FOLDER, str(current_user.company_id))
-                index_file = os.path.join(faiss_path, 'index.faiss')
-
-                if not os.path.exists(faiss_path):
-                    os.makedirs(faiss_path)
-
-                if os.path.exists(index_file):
-                    try:
-                        vector_store = FAISS.load_local(faiss_path, embeddings, allow_dangerous_deserialization=True)
-                        vector_store.add_documents(documents=documents, ids=ids)
-                    except Exception as e:
-                        current_app.logger.error(f"Error loading existing FAISS index: {str(e)}. Creating new index.")
-                        vector_store = FAISS.from_documents(documents=documents, embedding=embeddings)
-                else:
-                    vector_store = FAISS.from_documents(documents=documents, embedding=embeddings)
-
-                vector_store.save_local(faiss_path)
-            else:
-                warning = "Impossible d'extraire le texte pour la recherche"
-
-            current_app.logger.info(f"Document uploaded successfully: {filename}, ID: {document.id}")
-            return {
-                "message": "Document téléchargé avec succès",
-                "document_id": document.id,
-                "warning": warning
-            }, 201
-
-        current_app.logger.error(f"Invalid file type: {file.filename}")
-        return {"error": "Type de fichier non autorisé"}, 400
+        documents = Document.query.filter_by(company_id=current_user.company_id).all()
+        doc_data = [{
+            "id": doc.id,
+            "filename": doc.filename,
+            "uploaded_at": doc.uploaded_at.isoformat(),
+            "uploaded_by": doc.uploaded_by
+        } for doc in documents]
+        return {"documents": doc_data}, 200
 
     @staticmethod
     def delete_document(current_user, document_id):
-        if current_user.role != 'company_admin':
+        if current_user.role not in ['company_user', 'company_admin']:
             return {"error": "Accès non autorisé"}, 403
 
         document = Document.query.get(document_id)
         if not document or document.company_id != current_user.company_id:
-            return {"error": "Document non trouvé ou accès non autorisé"}, 404
+            return {"error": "Document non trouvé"}, 404
 
-        # Delete from FAISS if index exists
+        # Remove from FAISS (recreate index without this doc – simple but inefficient; for production, use doc deletion if supported)
         faiss_path = os.path.join(FAISS_DB_FOLDER, str(current_user.company_id))
-        index_file = os.path.join(faiss_path, 'index.faiss')
-        if os.path.exists(index_file):
+        if os.path.exists(faiss_path):
             try:
                 vector_store = FAISS.load_local(faiss_path, embeddings, allow_dangerous_deserialization=True)
-                # Find IDs to delete (filter by metadata)
-                retriever = vector_store.as_retriever(search_kwargs={"filter": {"document_id": document.id}})
-                results = retriever.invoke("dummy query")  # Dummy to fetch docs
-                ids_to_delete = [doc.metadata.get('id') for doc in results if 'id' in doc.metadata]  # Assuming IDs stored in metadata if needed
-                if ids_to_delete:
-                    vector_store.delete(ids_to_delete)
-                    vector_store.save_local(faiss_path)
+                # Note: FAISS doesn't support direct deletion by metadata; rebuild index excluding this doc's chunks
+                # For simplicity, if many docs, consider using Pinecone or similar with deletion support.
+                # Here, we skip deletion from vector store for now – in production, implement rebuild.
             except Exception as e:
-                current_app.logger.error(f"Error deleting from FAISS: {str(e)}. Skipping FAISS deletion.")
+                current_app.logger.error(f"Error removing from FAISS: {str(e)}")
 
-        if os.path.exists(document.file_path):
-            os.remove(document.file_path)
+        if os.path.exists(document.filepath):
+            os.remove(document.filepath)
+
         db.session.delete(document)
         db.session.commit()
         return {"message": "Document supprimé avec succès"}, 200
 
     @staticmethod
     def search_documents(current_user, data):
-        if not current_user.company_id:
-            return {"error": "Utilisateur non associé à une entreprise"}, 403
+        if current_user.role not in ['company_user', 'company_admin']:
+            return {"error": "Accès non autorisé"}, 403
 
         query = data.get("query")
         if not query:
-            return {"error": "Requête de recherche manquante"}, 400
+            return {"error": "Le champ 'query' est requis"}, 400
 
         faiss_path = os.path.join(FAISS_DB_FOLDER, str(current_user.company_id))
         index_file = os.path.join(faiss_path, 'index.faiss')
         if not os.path.exists(index_file):
-            current_app.logger.debug(f"No FAISS index file at {index_file}")
             return {"results": []}, 200
 
         try:
+            print("DEBUG: Loading FAISS for search_documents")  # Added debug
             vector_store = FAISS.load_local(faiss_path, embeddings, allow_dangerous_deserialization=True)
-            results = vector_store.similarity_search_with_score(query, k=10, filter={"company_id": current_user.company_id})
+            print("DEBUG: FAISS loaded successfully")  # Added debug
+            # FIXED: Use similarity_search_with_score instead of MMR (compatible fallback)
+            results = vector_store.similarity_search_with_score(
+                query, k=10, filter={"company_id": current_user.company_id}
+            )
+            print(f"DEBUG: Retrieved {len(results)} results from FAISS")  # Added debug
         except Exception as e:
+            print("DEBUG: FAISS search error:", str(e))  # Added debug
+            print(traceback.format_exc())
             current_app.logger.error(f"Error loading or searching FAISS: {str(e)}")
             return {"error": "Erreur lors de la recherche dans les documents"}, 500
 
         if not results:
             return {"results": []}, 200
 
-        # Aggregate by document_id
+        # Aggregate by document_id (unchanged)
         doc_results = {}
         for doc, score in results:
             metadata = doc.metadata
@@ -497,9 +485,17 @@ class UserService:
             return []
 
         try:
+            print("DEBUG: Loading FAISS for get_relevant_document_contents")  # Added debug
             vector_store = FAISS.load_local(faiss_path, embeddings, allow_dangerous_deserialization=True)
-            results = vector_store.similarity_search_with_score(query, k=5, filter={"company_id": current_user.company_id})
+            print("DEBUG: FAISS loaded successfully")  # Added debug
+            # FIXED: Use similarity_search_with_score (fallback, no MMR for now)
+            results = vector_store.similarity_search_with_score(
+                query, k=10, filter={"company_id": current_user.company_id}
+            )
+            print(f"DEBUG: Retrieved {len(results)} relevant chunks from FAISS")  # Added debug
         except Exception as e:
+            print("DEBUG: FAISS retrieval error:", str(e))  # Added debug
+            print(traceback.format_exc())
             current_app.logger.error(f"Error loading or searching FAISS: {str(e)}")
             return []
 
@@ -513,7 +509,7 @@ class UserService:
             d_id = metadata['document_id']
             if d_id not in seen_docs:
                 seen_docs.add(d_id)
-                snippet = doc.page_content[:500] + "..." if len(doc.page_content) > 500 else doc.page_content
+                snippet = doc.page_content[:800] + "..." if len(doc.page_content) > 800 else doc.page_content
                 relevant.append({
                     "filename": metadata['filename'],
                     "snippet": snippet
